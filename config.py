@@ -112,6 +112,9 @@ DATABASE_URL = os.getenv(
 )
 
 # --- HTTP behaviour ----------------------------------------------------------
-REQUEST_TIMEOUT = 60
-PAGE_LIMIT = 1000                 # OGC API Features page size
+REQUEST_TIMEOUT = 45              # read timeout per request (seconds)
+PAGE_LIMIT = 200                  # OGC API Features page size. Small on purpose:
+                                  # heavy AV parcel geometries at 1000/page can
+                                  # stall the server mid-response; 200 completes
+                                  # reliably and fails fast if a page is slow.
 USER_AGENT = "swiss-land-pipeline/0.1 (deal-sourcing; contact: you@example.ch)"
