@@ -1,0 +1,142 @@
+"""
+Loader: write fetched GeoJSON features into the raw.* staging tables, then run
+enrichment, scoring, and change-detection.
+
+Geometry handling: features arrive as GeoJSON in LV95 (2056). We hand the raw
+GeoJSON geometry to PostGIS via ST_GeomFromGeoJSON and force MultiPolygon +
+SRID 2056 in SQL, so we never depend on client-side geometry libraries being
+perfectly configured.
+"""
+from __future__ import annotations
+import json
+from typing import Iterable
+import psycopg2
+from psycopg2.extras import execute_batch
+
+from config import DATABASE_URL, BUILDING_ZONE_USES
+
+
+def connect():
+    return psycopg2.connect(DATABASE_URL)
+
+
+def _geom_sql(placeholder: str = "%s") -> str:
+    """Coerce a GeoJSON string into a MultiPolygon in SRID 2056."""
+    return (
+        f"ST_Multi(ST_CollectionExtract("
+        f"ST_MakeValid(ST_SetSRID(ST_GeomFromGeoJSON({placeholder}),2056)),3))"
+    )
+
+
+def truncate_raw(cur, table: str):
+    cur.execute(f"TRUNCATE {table};")
+
+
+def load_zoning(cur, features: Iterable[dict]):
+    """raw.zoning: derive is_building_zone from the harmonized primary use."""
+    sql = f"""
+        INSERT INTO raw.zoning(zone_id, commune_bfs, typ_kt, hauptnutzung,
+                               is_building_zone, geom)
+        VALUES (%s,%s,%s,%s,%s,{_geom_sql()})
+    """
+    rows = []
+    for f in features:
+        p = f.get("properties", {})
+        use = p.get("hauptnutzung") or p.get("primary_use") or p.get("typ_kt")
+        rows.append((
+            str(f.get("id") or p.get("t_id") or ""),
+            _to_int(p.get("bfs_nr") or p.get("commune_bfs")),
+            p.get("typ_kt") or p.get("typ_code"),
+            use,
+            use in BUILDING_ZONE_USES,
+            json.dumps(f.get("geometry")),
+        ))
+    execute_batch(cur, sql, rows, page_size=500)
+    return len(rows)
+
+
+def load_generic(cur, table: str, features: Iterable[dict], columns: list[str]):
+    """
+    Generic loader for layers where we only keep an id + geometry
+    (planning_zones, forest, buildings). `columns` excludes geom.
+    """
+    col_sql = ", ".join(columns + ["geom"])
+    ph = ", ".join(["%s"] * len(columns) + [_geom_sql()])
+    sql = f"INSERT INTO {table}({col_sql}) VALUES ({ph})"
+    rows = []
+    for f in features:
+        p = f.get("properties", {})
+        vals = [str(f.get("id") or "")]
+        # remaining columns pulled from properties by name if present
+        for c in columns[1:]:
+            vals.append(p.get(c))
+        vals.append(json.dumps(f.get("geometry")))
+        rows.append(tuple(vals))
+    execute_batch(cur, sql, rows, page_size=500)
+    return len(rows)
+
+
+def load_oereb(cur, restriction_rows: Iterable[dict]):
+    sql = """
+        INSERT INTO raw.oereb_restrictions
+            (egrid, theme_code, theme_text, sub_theme, legal_state)
+        VALUES (%(egrid)s,%(theme_code)s,%(theme_text)s,%(sub_theme)s,%(legal_state)s)
+    """
+    rows = list(restriction_rows)
+    execute_batch(cur, sql, rows, page_size=200)
+    return len(rows)
+
+
+def run_sql_file(cur, path: str):
+    with open(path, "r", encoding="utf-8") as fh:
+        cur.execute(fh.read())
+
+
+def detect_changes(cur):
+    """
+    Snapshot each parcel's material content as a hash, diff against the previous
+    run, and append change_log rows. New parcels and score jumps become alerts.
+    """
+    cur.execute("""
+        WITH cur AS (
+            SELECT egrid,
+                   md5(coalesce(zone_type,'') || '|' ||
+                       coalesce(is_building_zone::text,'') || '|' ||
+                       coalesce(round(area_m2)::text,'') || '|' ||
+                       coalesce(oereb_blocking::text,'') || '|' ||
+                       coalesce(round(opportunity_score)::text,'')) AS h
+            FROM core.parcel
+        ),
+        prev AS (
+            SELECT DISTINCT ON (egrid) egrid, content_hash
+            FROM audit.parcel_snapshot
+            ORDER BY egrid, run_ts DESC
+        )
+        INSERT INTO audit.change_log(egrid, change_type, detail)
+        SELECT c.egrid,
+               CASE WHEN p.egrid IS NULL THEN 'new' ELSE 'changed' END,
+               jsonb_build_object('new_hash', c.h, 'old_hash', p.content_hash)
+        FROM cur c
+        LEFT JOIN prev p ON p.egrid = c.egrid
+        WHERE p.content_hash IS DISTINCT FROM c.h;
+    """)
+    changed = cur.rowcount
+    # write the new snapshot
+    cur.execute("""
+        INSERT INTO audit.parcel_snapshot(egrid, content_hash)
+        SELECT egrid,
+               md5(coalesce(zone_type,'') || '|' ||
+                   coalesce(is_building_zone::text,'') || '|' ||
+                   coalesce(round(area_m2)::text,'') || '|' ||
+                   coalesce(oereb_blocking::text,'') || '|' ||
+                   coalesce(round(opportunity_score)::text,''))
+        FROM core.parcel;
+    """)
+    return changed
+
+
+def _to_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
