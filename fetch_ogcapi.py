@@ -35,8 +35,10 @@ import os
 # Set PILOT_ONLY=false only when you want full-canton with no cap.
 ACTIVE_BBOX = VAUD_BBOX_WGS84
 
-# Safety cap so no single layer can hang the pipeline. Env-tunable.
-MAX_FEATURES_PER_LAYER = int(os.getenv("MAX_FEATURES_PER_LAYER", "60000"))
+# Safety cap so no single layer can hang the pipeline. Raised because parcels/
+# buildings are fetched canton-wide (small API boxes return nothing) and then
+# filtered to the pilot communes AFTER loading. Env-tunable.
+MAX_FEATURES_PER_LAYER = int(os.getenv("MAX_FEATURES_PER_LAYER", "250000"))
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/geo+json"})
@@ -81,11 +83,14 @@ def fetch_features(
     """
     Yield GeoJSON features from one collection, paging until exhausted.
 
-    CRS strategy: we send the bbox in native Swiss LV95 (EPSG:2056) with an
-    explicit bbox-crs. Swiss-grid metres (~2.5M easting, ~1.1M northing) cannot
-    be silently axis-swapped into a valid-but-wrong lon/lat, so this avoids the
-    empty-result trap a small WGS84 box hit. We also request geometry back in
-    2056 via `crs`, so nothing is reprojected on ingest.
+    CRS strategy (confirmed empirically against geodienste via diagnose.py):
+      * bbox MUST be WGS84 lon/lat with NO bbox-crs — geodienste ignores bbox-crs,
+        so a 2056 bbox returns zero.
+      * SMALL boxes return zero on this server; only a canton-sized box matches.
+        So we fetch the whole canton and (optionally) clip to the pilot area in
+        PostGIS afterwards.
+      * crs=2056 IS honoured for output, so geometry comes back in Swiss LV95.
+        The loader is also CRS-defensive, so WGS84 output would still store OK.
     """
     url = f"{ogcapi_base}/collections/{collection}/items"
     params = {
