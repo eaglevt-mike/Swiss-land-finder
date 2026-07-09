@@ -28,7 +28,13 @@ _session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/geo+js
 
 
 def _get(url: str, params: Optional[dict] = None) -> dict:
-    """GET with retry/backoff on transient errors."""
+    """GET with retry/backoff on transient errors.
+
+    geodienste.ch content-negotiates and returns a 400 unless we explicitly
+    ask for JSON, so f=json is forced on every request.
+    """
+    params = dict(params or {})
+    params.setdefault("f", "json")
     for attempt in range(4):
         try:
             r = _session.get(url, params=params, timeout=REQUEST_TIMEOUT)
@@ -92,19 +98,38 @@ def fetch_features(
 
 def fetch_layer(source_cfg: dict) -> Iterator[dict]:
     """
-    Given a SOURCES[...] config dict, discover its main collection and stream
-    features. geodienste models usually expose one dominant feature collection
-    plus code-list collections; we pick the collection whose id contains the
-    model name.
+    Stream features from a source's main collection.
+
+    The collection id is taken from config ("collection") because geodienste's
+    real ids are French domain names (e.g. "affectation_primaire"), not the
+    model slug. If config doesn't pin one, we discover and match by keyword.
     """
     base = source_cfg["ogcapi"]
-    model = source_cfg["model"]
-    collections = list_collections(base)
-    if not collections:
-        return
-    # Prefer a collection whose id references the model; else take the first.
-    main = next((c for c in collections if model.split("_")[-1] in c.lower()), collections[0])
-    yield from fetch_features(base, main)
+    collection = source_cfg.get("collection")
+
+    available = None
+    if not collection:
+        available = list_collections(base)
+        if not available:
+            return
+        keywords = source_cfg.get("collection_keywords", [])
+        collection = next(
+            (c for c in available if any(k in c.lower() for k in keywords)),
+            available[0],
+        )
+
+    # Verify the pinned collection exists; if not, fall back to keyword match
+    # against the live collection list so a stale id degrades gracefully.
+    if available is None:
+        available = list_collections(base)
+    if collection not in available:
+        keywords = source_cfg.get("collection_keywords", [])
+        collection = next(
+            (c for c in available if any(k in c.lower() for k in keywords)),
+            available[0] if available else collection,
+        )
+
+    yield from fetch_features(base, collection)
 
 
 if __name__ == "__main__":
