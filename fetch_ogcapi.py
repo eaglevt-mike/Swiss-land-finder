@@ -19,20 +19,21 @@ import requests
 
 from config import PAGE_LIMIT, REQUEST_TIMEOUT, USER_AGENT, PILOT_ONLY
 
-# Bounding boxes in native Swiss LV95 (EPSG:2056), metres: minE, minN, maxE, maxN.
-# We query in 2056 (not WGS84) because Swiss-grid coordinates are unambiguous —
-# they cannot be silently axis-swapped into a valid-but-wrong location the way
-# lon/lat can, which is what caused empty results on the small WGS84 box.
-VAUD_BBOX_2056 = (494000, 118000, 585000, 197000)      # whole canton
+# geodienste does NOT honour bbox-crs: sending a 2056 bbox returns zero because
+# the server reads the metric numbers as lon/lat. So we send WGS84 lon/lat, which
+# is the OGC default and works (the canton box returned 25,913 zoning features).
+# minlon, minlat, maxlon, maxlat.
+VAUD_BBOX_WGS84 = (6.06, 46.19, 7.24, 47.01)          # whole canton (works)
 
-# Greater Lausanne (Lausanne, Prilly, Renens, Pully, Écublens) in LV95.
-# Lausanne centre is ~2538000 E, 1152000 N.
-LAUSANNE_BBOX_2056 = (2528000, 1148000, 2548000, 1160000)
+# Greater Lausanne in WGS84. NOTE: a *small* WGS84 box previously returned zero
+# for some layers, so the pilot restriction is now enforced by the feature CAP
+# (MAX_FEATURES_PER_LAYER) applied to the working canton box, not by a small box.
+LAUSANNE_BBOX_WGS84 = (6.50, 46.48, 6.75, 46.60)
 
 import os
-# Active box: pilot (small) unless PILOT_ONLY is explicitly disabled.
-ACTIVE_BBOX = LAUSANNE_BBOX_2056 if PILOT_ONLY else VAUD_BBOX_2056
-BBOX_CRS = "http://www.opengis.net/def/crs/EPSG/0/2056"
+# We query the canton box (which works) and let the feature cap bound volume.
+# Set PILOT_ONLY=false only when you want full-canton with no cap.
+ACTIVE_BBOX = VAUD_BBOX_WGS84
 
 # Safety cap so no single layer can hang the pipeline. Env-tunable.
 MAX_FEATURES_PER_LAYER = int(os.getenv("MAX_FEATURES_PER_LAYER", "60000"))
@@ -89,9 +90,8 @@ def fetch_features(
     url = f"{ogcapi_base}/collections/{collection}/items"
     params = {
         "limit": PAGE_LIMIT,
-        "bbox": ",".join(str(v) for v in bbox),
-        "bbox-crs": BBOX_CRS,
-        "crs": out_crs,
+        "bbox": ",".join(str(v) for v in bbox),   # WGS84 lon/lat (OGC default)
+        "crs": out_crs,                            # ask for 2056 geometry back
     }
     seen = 0
     page = 0
@@ -165,15 +165,10 @@ def fetch_layer(source_cfg: dict) -> Iterator[dict]:
             available[0] if available else collection,
         )
 
-    # Fetch with the active (pilot) box. If it yields nothing but the layer
-    # plausibly has data here, retry once with the full-canton box (capped), so
-    # a too-tight or CRS-quirky pilot box never produces a silent zero.
-    feats = list(fetch_features(base, collection, bbox=ACTIVE_BBOX))
-    if not feats and ACTIVE_BBOX != VAUD_BBOX_2056:
-        print(f"    [retry] {collection}: 0 in pilot box, retrying full canton",
-              flush=True)
-        feats = list(fetch_features(base, collection, bbox=VAUD_BBOX_2056))
-    yield from feats
+    # Single fetch against the working WGS84 canton box; the feature cap bounds
+    # volume for the pilot. (Earlier per-box retry logic is unnecessary now that
+    # we use the proven canton box directly.)
+    yield from fetch_features(base, collection, bbox=ACTIVE_BBOX)
 
 
 if __name__ == "__main__":
