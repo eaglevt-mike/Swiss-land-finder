@@ -79,6 +79,7 @@ def fetch_features(
     collection: str,
     bbox: tuple[float, float, float, float] = ACTIVE_BBOX,
     out_crs: str = "http://www.opengis.net/def/crs/EPSG/0/2056",
+    cql_filter: str = None,
 ) -> Iterator[dict]:
     """
     Yield GeoJSON features from one collection, paging until exhausted.
@@ -98,6 +99,12 @@ def fetch_features(
         "bbox": ",".join(str(v) for v in bbox),   # WGS84 lon/lat (OGC default)
         "crs": out_crs,                            # ask for 2056 geometry back
     }
+    if cql_filter:
+        # OGC API Features Part 3: server-side attribute filter (e.g. Kanton='VD').
+        # If geodienste doesn't support it, the request errors and the caller
+        # falls back to client-side filtering.
+        params["filter"] = cql_filter
+        params["filter-lang"] = "cql2-text"
     seen = 0
     page = 0
     while True:
@@ -170,9 +177,27 @@ def fetch_layer(source_cfg: dict) -> Iterator[dict]:
             available[0] if available else collection,
         )
 
-    # Single fetch against the working WGS84 canton box; the feature cap bounds
-    # volume for the pilot. (Earlier per-box retry logic is unnecessary now that
-    # we use the proven canton box directly.)
+    # Try a server-side attribute filter (e.g. Kanton='VD') if the source
+    # defines one. geodienste may not support OGC Part 3 filtering; if the
+    # filtered request errors, fall back to unfiltered (the loader still applies
+    # a client-side canton filter as a safety net).
+    cql = source_cfg.get("cql_filter")
+    if cql:
+        try:
+            first = None
+            gen = fetch_features(base, collection, bbox=ACTIVE_BBOX, cql_filter=cql)
+            first = next(gen, "STOP")
+            if first != "STOP":
+                yield first
+                yield from gen
+                return
+            # empty result with filter — fall through to unfiltered below
+            print(f"    [info] {collection}: server filter returned 0, retrying unfiltered",
+                  flush=True)
+        except Exception as e:
+            print(f"    [info] {collection}: server filter unsupported ({e}); unfiltered",
+                  flush=True)
+
     yield from fetch_features(base, collection, bbox=ACTIVE_BBOX)
 
 
