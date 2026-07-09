@@ -24,20 +24,23 @@ PILOT_ONLY = os.getenv("PILOT_ONLY", "true").lower() == "true"
 # Collections are filtered per canton via the STAC/feature "canton" attribute.
 GEODIENSTE = "https://geodienste.ch/db"
 
+# Collection IDs below are the REAL geodienste ids (French domain names),
+# confirmed from each service's /collections endpoint — not the model slug.
 SOURCES = {
     "zoning": {
         "ogcapi": f"{GEODIENSTE}/npl_nutzungsplanung_v1_2_0/fra/ogcapi",
-        "model": "npl_nutzungsplanung",
+        "collection": "affectation_primaire",   # primary land-use zones
         "raw_table": "raw.zoning",
     },
     "planning_zones": {
         "ogcapi": f"{GEODIENSTE}/planungszonen_v1_1_0/fra/ogcapi",
-        "model": "planungszonen",
+        "collection": "zones_reservees",        # Art. 27 RPG reserved zones
         "raw_table": "raw.planning_zones",
     },
     "forest": {
         "ogcapi": f"{GEODIENSTE}/npl_waldgrenzen_v1_2_0/fra/ogcapi",
-        "model": "npl_waldgrenzen",
+        "collection": "limites_de_la_foret_statiques",  # static forest limits
+        "collection_keywords": ["foret", "wald", "limite"],  # fallback match
         "raw_table": "raw.forest",
     },
 }
@@ -58,15 +61,29 @@ OEREB_BASE = "https://oereb.vd.ch"        # Vaud cantonal OEREB endpoint
 OEREB_EXTRACT = OEREB_BASE + "/oereb/extract/json"
 
 # --- Building-zone classification --------------------------------------------
-# The harmonized model exposes 9 primary uses; these three are the build zones.
-# Everything else (agriculture, protected, traffic, forest...) is non-build.
-BUILDING_ZONE_USES = {
-    "Wohnzonen",              # residential
-    "Arbeitszonen",          # work / industrial-commercial
-    "Mischzonen",            # mixed use
-    "Zentrumszonen",         # centre zones
-    "ZoneMitBesondererNutzung",  # special-use (case by case; kept optimistic)
-}
+# The harmonized MGDM Nutzungsplanung model groups every zone under one of 9
+# primary uses. The build zones are residential, work, mixed, and centre. The
+# geodienste service labels these in the language of the endpoint (we use the
+# French /fra endpoint), and the harmonized code is also exposed. To be robust
+# across languages and label spellings, we classify by SUBSTRING match on a set
+# of tokens rather than exact strings. Anything matching is treated as a
+# building zone; agriculture/protection/forest/traffic fall through to non-build.
+BUILDING_ZONE_TOKENS = [
+    # German
+    "wohn", "arbeit", "misch", "zentrum", "kern", "bauzone",
+    # French
+    "habitation", "logement", "travail", "activit", "mixte", "centre",
+    "batir", "à bâtir", "a batir", "constructible",
+    # Italian (a few cantons)
+    "abitativ", "lavoro", "mista", "centro", "edificabile",
+]
+
+# Tokens that force NON-build even if a build token also appears (safety net).
+NON_BUILDING_TOKENS = [
+    "agricol", "landwirtschaft", "agricoltura",
+    "protect", "schutz", "protezione",
+    "foret", "wald", "bosco", "forest",
+]
 
 # --- Database ----------------------------------------------------------------
 # On Railway this comes from the PostGIS plugin as DATABASE_URL.
