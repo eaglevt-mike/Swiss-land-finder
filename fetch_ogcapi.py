@@ -19,18 +19,20 @@ import requests
 
 from config import PAGE_LIMIT, REQUEST_TIMEOUT, USER_AGENT, PILOT_ONLY
 
-# Bounding box for Canton Vaud in WGS84 (lon/lat) — the OGC default CRS.
-# minlon, minlat, maxlon, maxlat. Comfortable envelope around the whole canton.
-VAUD_BBOX_WGS84 = (6.06, 46.19, 7.24, 47.01)
+# Bounding boxes in native Swiss LV95 (EPSG:2056), metres: minE, minN, maxE, maxN.
+# We query in 2056 (not WGS84) because Swiss-grid coordinates are unambiguous —
+# they cannot be silently axis-swapped into a valid-but-wrong location the way
+# lon/lat can, which is what caused empty results on the small WGS84 box.
+VAUD_BBOX_2056 = (494000, 118000, 585000, 197000)      # whole canton
 
-# Tight box around greater Lausanne (Lausanne, Prilly, Renens, Pully, Écublens)
-# for the pilot. Canton-wide parcel/building layers are hundreds of thousands of
-# features and take far too long; the pilot box keeps the first runs fast.
-LAUSANNE_BBOX_WGS84 = (6.55, 46.50, 6.72, 46.58)
+# Greater Lausanne (Lausanne, Prilly, Renens, Pully, Écublens) in LV95.
+# Lausanne centre is ~2538000 E, 1152000 N.
+LAUSANNE_BBOX_2056 = (2528000, 1148000, 2548000, 1160000)
 
 import os
 # Active box: pilot (small) unless PILOT_ONLY is explicitly disabled.
-ACTIVE_BBOX = LAUSANNE_BBOX_WGS84 if PILOT_ONLY else VAUD_BBOX_WGS84
+ACTIVE_BBOX = LAUSANNE_BBOX_2056 if PILOT_ONLY else VAUD_BBOX_2056
+BBOX_CRS = "http://www.opengis.net/def/crs/EPSG/0/2056"
 
 # Safety cap so no single layer can hang the pipeline. Env-tunable.
 MAX_FEATURES_PER_LAYER = int(os.getenv("MAX_FEATURES_PER_LAYER", "60000"))
@@ -72,25 +74,23 @@ def list_collections(ogcapi_base: str) -> list[str]:
 def fetch_features(
     ogcapi_base: str,
     collection: str,
-    bbox_wgs84: tuple[float, float, float, float] = ACTIVE_BBOX,
+    bbox: tuple[float, float, float, float] = ACTIVE_BBOX,
     out_crs: str = "http://www.opengis.net/def/crs/EPSG/0/2056",
 ) -> Iterator[dict]:
     """
     Yield GeoJSON features from one collection, paging until exhausted.
 
-    CRS strategy: we send the bbox in WGS84 lon/lat, which is the OGC default
-    and is honoured by every compliant server (geodienste did NOT reliably honour
-    a 2056 bbox-crs, silently returning zero features). We still ask for the
-    geometry back in LV95 (2056) via the `crs` parameter, so nothing needs
-    reprojecting on ingest. If the server ignores `crs` and returns WGS84, the
-    loader's ST_SetSRID/ST_Transform-free path still stores valid geometry because
-    the coordinates are self-describing GeoJSON — but in practice geodienste
-    honours `crs`.
+    CRS strategy: we send the bbox in native Swiss LV95 (EPSG:2056) with an
+    explicit bbox-crs. Swiss-grid metres (~2.5M easting, ~1.1M northing) cannot
+    be silently axis-swapped into a valid-but-wrong lon/lat, so this avoids the
+    empty-result trap a small WGS84 box hit. We also request geometry back in
+    2056 via `crs`, so nothing is reprojected on ingest.
     """
     url = f"{ogcapi_base}/collections/{collection}/items"
     params = {
         "limit": PAGE_LIMIT,
-        "bbox": ",".join(str(v) for v in bbox_wgs84),   # WGS84 lon/lat, no bbox-crs
+        "bbox": ",".join(str(v) for v in bbox),
+        "bbox-crs": BBOX_CRS,
         "crs": out_crs,
     }
     seen = 0
@@ -127,7 +127,7 @@ def fetch_features(
 
     if seen == 0:
         # Surface WHY nothing came back so a zero-run is diagnosable from logs.
-        print(f"    [warn] {collection}: 0 features for bbox {bbox_wgs84} "
+        print(f"    [warn] {collection}: 0 features for bbox {bbox} "
               f"(check bbox covers the canton and collection has data here)",
               flush=True)
 
@@ -165,7 +165,15 @@ def fetch_layer(source_cfg: dict) -> Iterator[dict]:
             available[0] if available else collection,
         )
 
-    yield from fetch_features(base, collection)
+    # Fetch with the active (pilot) box. If it yields nothing but the layer
+    # plausibly has data here, retry once with the full-canton box (capped), so
+    # a too-tight or CRS-quirky pilot box never produces a silent zero.
+    feats = list(fetch_features(base, collection, bbox=ACTIVE_BBOX))
+    if not feats and ACTIVE_BBOX != VAUD_BBOX_2056:
+        print(f"    [retry] {collection}: 0 in pilot box, retrying full canton",
+              flush=True)
+        feats = list(fetch_features(base, collection, bbox=VAUD_BBOX_2056))
+    yield from feats
 
 
 if __name__ == "__main__":
