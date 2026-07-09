@@ -21,10 +21,24 @@ def connect():
 
 
 def _geom_sql(placeholder: str = "%s") -> str:
-    """Coerce a GeoJSON string into a MultiPolygon in SRID 2056."""
+    """Coerce a GeoJSON geometry into a valid MultiPolygon in SRID 2056,
+    regardless of whether the server returned LV95 metres or WGS84 degrees.
+
+    LV95 easting is a large metric value (~2.5 million); WGS84 longitude for
+    Switzerland is ~6-10. We detect which one we got and transform if needed, so
+    every downstream area/intersection stays correct even if geodienste ignores
+    the `crs=2056` request parameter.
+
+    The input placeholder is referenced once and expanded in SQL via a LATERAL-
+    style scalar subselect, so each row still binds the GeoJSON exactly once.
+    """
     return (
-        f"ST_Multi(ST_CollectionExtract("
-        f"ST_MakeValid(ST_SetSRID(ST_GeomFromGeoJSON({placeholder}),2056)),3))"
+        "ST_Multi(ST_CollectionExtract(ST_MakeValid("
+        "(SELECT CASE WHEN abs(ST_X(ST_PointOnSurface(g.geom))) <= 200 "
+        "THEN ST_Transform(ST_SetSRID(g.geom,4326),2056) "
+        "ELSE ST_SetSRID(g.geom,2056) END "
+        f"FROM (SELECT ST_GeomFromGeoJSON({placeholder}) AS geom) g)"
+        "),3))"
     )
 
 
