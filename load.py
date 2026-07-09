@@ -13,7 +13,7 @@ from typing import Iterable
 import psycopg2
 from psycopg2.extras import execute_batch
 
-from config import DATABASE_URL, BUILDING_ZONE_USES
+from config import DATABASE_URL, BUILDING_ZONE_TOKENS, NON_BUILDING_TOKENS
 
 
 def connect():
@@ -42,17 +42,31 @@ def load_zoning(cur, features: Iterable[dict]):
     rows = []
     for f in features:
         p = f.get("properties", {})
-        use = p.get("hauptnutzung") or p.get("primary_use") or p.get("typ_kt")
+        # The harmonized primary-use label appears under one of these keys
+        # depending on model version and endpoint language.
+        use = (p.get("typ_kt") or p.get("hauptnutzung") or p.get("primary_use")
+               or p.get("typ_code") or p.get("code") or "")
         rows.append((
             str(f.get("id") or p.get("t_id") or ""),
-            _to_int(p.get("bfs_nr") or p.get("commune_bfs")),
+            _to_int(p.get("bfs_nr") or p.get("commune_bfs") or p.get("bfsnr")),
             p.get("typ_kt") or p.get("typ_code"),
             use,
-            use in BUILDING_ZONE_USES,
+            _is_building_zone(use),
             json.dumps(f.get("geometry")),
         ))
     execute_batch(cur, sql, rows, page_size=500)
     return len(rows)
+
+
+def _is_building_zone(use) -> bool:
+    """Language-agnostic build-zone test by substring match, with a non-build
+    safety net so 'zone agricole' never slips through on a stray token."""
+    if not use:
+        return False
+    s = str(use).lower()
+    if any(tok in s for tok in NON_BUILDING_TOKENS):
+        return False
+    return any(tok in s for tok in BUILDING_ZONE_TOKENS)
 
 
 def load_generic(cur, table: str, features: Iterable[dict], columns: list[str]):
