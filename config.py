@@ -51,7 +51,9 @@ SOURCES = {
         "ogcapi": f"{GEODIENSTE}/av_0/deu/ogcapi",
         "collection": "RESF",            # Liegenschaften = legal parcels
         "collection_keywords": ["liegenschaft", "resf"],
-        "cql_filter": "Kanton='VD'",     # server-side Vaud filter (falls back if unsupported)
+        # NOTE: no server-side cql_filter — geodienste does not reliably support
+        # OGC Part 3 filtering and may hang or ignore it. The loader applies a
+        # tested client-side Kanton='VD' filter instead.
         "raw_table": "raw.parcels",
     },
     "buildings": {
