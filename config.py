@@ -43,6 +43,22 @@ SOURCES = {
         "collection_keywords": ["foret", "wald", "limite"],  # fallback match
         "raw_table": "raw.forest",
     },
+    # Official cadastral survey (amtliche Vermessung). NOTE: AV data on
+    # geodienste is access-controlled per canton — Vaud may require an
+    # authenticated connection, in which case these return empty/403 and you
+    # fall back to the viageo.ch export. The fetchers log this clearly.
+    "parcels": {
+        "ogcapi": f"{GEODIENSTE}/av_0/deu/ogcapi",
+        "collection": "RESF",            # Liegenschaften = legal parcels
+        "collection_keywords": ["liegenschaft", "resf"],
+        "raw_table": "raw.parcels",
+    },
+    "buildings": {
+        "ogcapi": f"{GEODIENSTE}/av_0/deu/ogcapi",
+        "collection": "LCSF",            # Bodenbedeckung (land cover incl. buildings)
+        "collection_keywords": ["bodenbedeckung", "lcsf"],
+        "raw_table": "raw.buildings",
+    },
 }
 
 # --- Cantonal / cadastral sources --------------------------------------------
