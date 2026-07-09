@@ -20,7 +20,9 @@ import load as L
 import fetch_ogcapi as F
 import fetch_oereb as O
 
-SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
+# resolve SQL files next to this script, whatever the working directory is,
+# so a flattened repo layout can't break the paths.
+SQL_DIR = Path(__file__).resolve().parent
 SCHEMA = SQL_DIR / "001_schema.sql"
 ENRICH = SQL_DIR / "002_enrich.sql"
 SCORE = SQL_DIR / "003_score.sql"
