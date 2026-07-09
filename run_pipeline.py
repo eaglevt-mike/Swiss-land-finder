@@ -40,6 +40,31 @@ def ensure_schema(cur):
 def fetch_and_load_all(conn):
     cur = conn.cursor()
 
+    # Parcels first — everything else enriches onto them. If AV is access-
+    # controlled for Vaud this returns 0 and we log a clear hint.
+    log("fetching cadastral parcels (AV)...")
+    L.truncate_raw(cur, "raw.parcels")
+    try:
+        n = L.load_parcels(cur, F.fetch_layer(SOURCES["parcels"]))
+    except Exception as e:
+        n = 0
+        log(f"  parcels: fetch failed ({e})")
+    log(f"  parcels: {n}")
+    if n == 0:
+        log("  [hint] AV parcels may require cantonal authorization on "
+            "geodienste; if so, use the viageo.ch export fallback.")
+    conn.commit()
+
+    log("fetching buildings (AV land cover)...")
+    L.truncate_raw(cur, "raw.buildings")
+    try:
+        n = L.load_buildings(cur, F.fetch_layer(SOURCES["buildings"]))
+    except Exception as e:
+        n = 0
+        log(f"  buildings: fetch failed ({e})")
+    log(f"  buildings: {n}")
+    conn.commit()
+
     log("fetching zoning...")
     L.truncate_raw(cur, "raw.zoning")
     n = L.load_zoning(cur, F.fetch_layer(SOURCES["zoning"]))
