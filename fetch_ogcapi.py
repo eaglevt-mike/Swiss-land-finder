@@ -41,24 +41,33 @@ ACTIVE_BBOX = VAUD_BBOX_WGS84
 MAX_FEATURES_PER_LAYER = int(os.getenv("MAX_FEATURES_PER_LAYER", "80000"))
 
 # Hard ceiling on pages regardless of features, so a slow/looping endpoint can
-# never hang the deploy. At PAGE_LIMIT=1000 this caps ~80k features / ~80 pages.
-MAX_PAGES = int(os.getenv("MAX_PAGES", "90"))
+# never hang the deploy. At PAGE_LIMIT=200 this allows up to ~80k features.
+MAX_PAGES = int(os.getenv("MAX_PAGES", "450"))
+
+# Absolute wall-clock budget per layer (seconds). Once exceeded, we stop with a
+# partial load. This is the ultimate anti-hang guard, independent of pages/features.
+import time as _time
+LAYER_TIME_BUDGET = int(os.getenv("LAYER_TIME_BUDGET", "300"))
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/geo+json"})
 
 
 def _get(url: str, params: Optional[dict] = None) -> dict:
-    """GET with retry/backoff on transient errors.
+    """GET with retry/backoff and a hard connect+read timeout.
 
-    geodienste.ch content-negotiates and returns a 400 unless we explicitly
-    ask for JSON, so f=json is forced on every request.
+    geodienste content-negotiates and returns 400 unless f=json is set.
+    The timeout is a (connect, read) tuple: if the server accepts the connection
+    but then stalls mid-response, the read times out fast rather than hanging the
+    whole deploy (the failure mode we hit on the heavy AV parcel layer).
     """
     params = dict(params or {})
     params.setdefault("f", "json")
+    # (connect timeout, read timeout) in seconds.
+    timeout = (15, REQUEST_TIMEOUT)
     for attempt in range(4):
         try:
-            r = _session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            r = _session.get(url, params=params, timeout=timeout)
             if r.status_code == 200:
                 return r.json()
             if r.status_code in (429, 502, 503, 504):
@@ -111,8 +120,14 @@ def fetch_features(
         params["filter-lang"] = "cql2-text"
     seen = 0
     page = 0
+    started = _time.time()
     while True:
-        data = _get(url, params=params)
+        try:
+            data = _get(url, params=params)
+        except Exception as e:
+            print(f"    [warn] {collection}: page {page+1} failed ({e}); "
+                  f"stopping with {seen} features.", flush=True)
+            break
         feats = data.get("features", [])
         for f in feats:
             yield f
@@ -121,7 +136,14 @@ def fetch_features(
 
         # Progress ping every 10 pages so long fetches show life in the logs.
         if page % 10 == 0:
-            print(f"    ...{collection}: {seen} features so far", flush=True)
+            elapsed = int(_time.time() - started)
+            print(f"    ...{collection}: {seen} features so far ({elapsed}s)", flush=True)
+
+        # Wall-clock budget: ultimate anti-hang guard.
+        if _time.time() - started > LAYER_TIME_BUDGET:
+            print(f"    [warn] {collection}: hit time budget {LAYER_TIME_BUDGET}s; "
+                  f"stopping with {seen} features.", flush=True)
+            break
 
         # Hard safety cap: never let one layer run away. If hit, we log and stop
         # with a partial load rather than hanging the whole pipeline.
