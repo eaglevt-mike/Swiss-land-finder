@@ -17,11 +17,23 @@ import time
 from typing import Iterator, Optional
 import requests
 
-from config import PAGE_LIMIT, REQUEST_TIMEOUT, USER_AGENT
+from config import PAGE_LIMIT, REQUEST_TIMEOUT, USER_AGENT, PILOT_ONLY
 
 # Bounding box for Canton Vaud in WGS84 (lon/lat) — the OGC default CRS.
-# minlon, minlat, maxlon, maxlat. Comfortable envelope around the canton.
+# minlon, minlat, maxlon, maxlat. Comfortable envelope around the whole canton.
 VAUD_BBOX_WGS84 = (6.06, 46.19, 7.24, 47.01)
+
+# Tight box around greater Lausanne (Lausanne, Prilly, Renens, Pully, Écublens)
+# for the pilot. Canton-wide parcel/building layers are hundreds of thousands of
+# features and take far too long; the pilot box keeps the first runs fast.
+LAUSANNE_BBOX_WGS84 = (6.55, 46.50, 6.72, 46.58)
+
+import os
+# Active box: pilot (small) unless PILOT_ONLY is explicitly disabled.
+ACTIVE_BBOX = LAUSANNE_BBOX_WGS84 if PILOT_ONLY else VAUD_BBOX_WGS84
+
+# Safety cap so no single layer can hang the pipeline. Env-tunable.
+MAX_FEATURES_PER_LAYER = int(os.getenv("MAX_FEATURES_PER_LAYER", "60000"))
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/geo+json"})
@@ -60,7 +72,7 @@ def list_collections(ogcapi_base: str) -> list[str]:
 def fetch_features(
     ogcapi_base: str,
     collection: str,
-    bbox_wgs84: tuple[float, float, float, float] = VAUD_BBOX_WGS84,
+    bbox_wgs84: tuple[float, float, float, float] = ACTIVE_BBOX,
     out_crs: str = "http://www.opengis.net/def/crs/EPSG/0/2056",
 ) -> Iterator[dict]:
     """
@@ -90,6 +102,18 @@ def fetch_features(
             yield f
         seen += len(feats)
         page += 1
+
+        # Progress ping every 10 pages so long fetches show life in the logs.
+        if page % 10 == 0:
+            print(f"    ...{collection}: {seen} features so far", flush=True)
+
+        # Hard safety cap: never let one layer run away. If hit, we log and stop
+        # with a partial load rather than hanging the whole pipeline.
+        if seen >= MAX_FEATURES_PER_LAYER:
+            print(f"    [warn] {collection}: hit cap {MAX_FEATURES_PER_LAYER}; "
+                  f"stopping early. Tighten the bbox for full coverage.",
+                  flush=True)
+            break
 
         # Follow the standard OGC API "next" link if present.
         next_url = None
