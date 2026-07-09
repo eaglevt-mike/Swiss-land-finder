@@ -19,11 +19,12 @@ import requests
 
 from config import PAGE_LIMIT, REQUEST_TIMEOUT, USER_AGENT, PILOT_ONLY
 
-# geodienste does NOT honour bbox-crs: sending a 2056 bbox returns zero because
-# the server reads the metric numbers as lon/lat. So we send WGS84 lon/lat, which
-# is the OGC default and works (the canton box returned 25,913 zoning features).
-# minlon, minlat, maxlon, maxlat.
-VAUD_BBOX_WGS84 = (6.06, 46.19, 7.24, 47.01)          # whole canton (works)
+# WGS84 lon/lat box. NOTE: the full canton box also catches Geneva (SW) and bits
+# of neighbouring cantons. For parcels (a huge nationwide layer) that means lots
+# of wrong-canton download, so we bias the box toward Vaud proper. Lausanne is at
+# 6.63E, 46.52N; Vaud extends roughly 6.1-7.24E, 46.4-47.01N. This still includes
+# some Geneva/Fribourg edge, which the loader's Kanton='VD' filter removes.
+VAUD_BBOX_WGS84 = (6.10, 46.40, 7.24, 47.01)
 
 # Greater Lausanne in WGS84. NOTE: a *small* WGS84 box previously returned zero
 # for some layers, so the pilot restriction is now enforced by the feature CAP
@@ -35,10 +36,13 @@ import os
 # Set PILOT_ONLY=false only when you want full-canton with no cap.
 ACTIVE_BBOX = VAUD_BBOX_WGS84
 
-# Safety cap so no single layer can hang the pipeline. Raised because parcels/
-# buildings are fetched canton-wide (small API boxes return nothing) and then
-# filtered to the pilot communes AFTER loading. Env-tunable.
-MAX_FEATURES_PER_LAYER = int(os.getenv("MAX_FEATURES_PER_LAYER", "250000"))
+# Safety cap so no single layer can hang the pipeline. Parcels are fetched
+# canton-wide then filtered to VD client-side, so keep this bounded. Env-tunable.
+MAX_FEATURES_PER_LAYER = int(os.getenv("MAX_FEATURES_PER_LAYER", "80000"))
+
+# Hard ceiling on pages regardless of features, so a slow/looping endpoint can
+# never hang the deploy. At PAGE_LIMIT=1000 this caps ~80k features / ~80 pages.
+MAX_PAGES = int(os.getenv("MAX_PAGES", "90"))
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/geo+json"})
@@ -124,6 +128,12 @@ def fetch_features(
         if seen >= MAX_FEATURES_PER_LAYER:
             print(f"    [warn] {collection}: hit cap {MAX_FEATURES_PER_LAYER}; "
                   f"stopping early. Tighten the bbox for full coverage.",
+                  flush=True)
+            break
+
+        # Hard page ceiling: absolute anti-hang guard, independent of features.
+        if page >= MAX_PAGES:
+            print(f"    [warn] {collection}: hit page ceiling {MAX_PAGES}; stopping.",
                   flush=True)
             break
 
