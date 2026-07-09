@@ -19,9 +19,9 @@ import requests
 
 from config import PAGE_LIMIT, REQUEST_TIMEOUT, USER_AGENT
 
-# Approximate bounding box for Canton Vaud in LV95 (EPSG:2056), metres.
-# minx, miny, maxx, maxy. Comfortable envelope around the canton.
-VAUD_BBOX_2056 = (494000, 118000, 585000, 197000)
+# Bounding box for Canton Vaud in WGS84 (lon/lat) — the OGC default CRS.
+# minlon, minlat, maxlon, maxlat. Comfortable envelope around the canton.
+VAUD_BBOX_WGS84 = (6.06, 46.19, 7.24, 47.01)
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/geo+json"})
@@ -60,30 +60,36 @@ def list_collections(ogcapi_base: str) -> list[str]:
 def fetch_features(
     ogcapi_base: str,
     collection: str,
-    bbox: tuple[float, float, float, float] = VAUD_BBOX_2056,
-    bbox_crs: str = "http://www.opengis.net/def/crs/EPSG/0/2056",
+    bbox_wgs84: tuple[float, float, float, float] = VAUD_BBOX_WGS84,
+    out_crs: str = "http://www.opengis.net/def/crs/EPSG/0/2056",
 ) -> Iterator[dict]:
     """
     Yield GeoJSON features from one collection, paging until exhausted.
 
-    We request geometry in LV95 (2056) so nothing is reprojected on ingest.
-    Not every deployment honours bbox-crs; the loader tolerates either CRS and
-    the enrichment step is CRS-correct regardless because we store 2056.
+    CRS strategy: we send the bbox in WGS84 lon/lat, which is the OGC default
+    and is honoured by every compliant server (geodienste did NOT reliably honour
+    a 2056 bbox-crs, silently returning zero features). We still ask for the
+    geometry back in LV95 (2056) via the `crs` parameter, so nothing needs
+    reprojecting on ingest. If the server ignores `crs` and returns WGS84, the
+    loader's ST_SetSRID/ST_Transform-free path still stores valid geometry because
+    the coordinates are self-describing GeoJSON — but in practice geodienste
+    honours `crs`.
     """
     url = f"{ogcapi_base}/collections/{collection}/items"
     params = {
         "limit": PAGE_LIMIT,
-        "bbox": ",".join(str(v) for v in bbox),
-        "bbox-crs": bbox_crs,
-        "crs": "http://www.opengis.net/def/crs/EPSG/0/2056",
+        "bbox": ",".join(str(v) for v in bbox_wgs84),   # WGS84 lon/lat, no bbox-crs
+        "crs": out_crs,
     }
     seen = 0
+    page = 0
     while True:
         data = _get(url, params=params)
         feats = data.get("features", [])
         for f in feats:
             yield f
         seen += len(feats)
+        page += 1
 
         # Follow the standard OGC API "next" link if present.
         next_url = None
@@ -94,6 +100,12 @@ def fetch_features(
         if not next_url or not feats:
             break
         url, params = next_url, None   # next link already carries the params
+
+    if seen == 0:
+        # Surface WHY nothing came back so a zero-run is diagnosable from logs.
+        print(f"    [warn] {collection}: 0 features for bbox {bbox_wgs84} "
+              f"(check bbox covers the canton and collection has data here)",
+              flush=True)
 
 
 def fetch_layer(source_cfg: dict) -> Iterator[dict]:
