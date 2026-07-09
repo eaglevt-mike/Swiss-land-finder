@@ -83,6 +83,76 @@ def _is_building_zone(use) -> bool:
     return any(tok in s for tok in BUILDING_ZONE_TOKENS)
 
 
+def load_parcels(cur, features: Iterable[dict]):
+    """
+    Load cadastral parcels (AV 'Liegenschaften' / RESF collection).
+
+    The AV display layer doesn't always expose EGRID directly, so we derive a
+    stable source_id from the feature id and use the parcel number where present.
+    A synthetic egrid is built from the feature id so downstream joins and the
+    change-detection snapshot have a stable key. Field names vary by canton, so
+    every lookup is defensive.
+    """
+    sql = f"""
+        INSERT INTO raw.parcels(source_id, egrid, commune_bfs, commune_name,
+                                parcel_no, area_m2, geom)
+        VALUES (%s,%s,%s,%s,%s,%s,{_geom_sql()})
+    """
+    rows = []
+    for f in features:
+        p = f.get("properties", {})
+        fid = str(f.get("id") or p.get("t_id") or p.get("identifikator") or "")
+        egrid = (p.get("egris_egrid") or p.get("egrid") or p.get("nbident")
+                 or (f"SYN-{fid}" if fid else None))
+        parcel_no = (p.get("nummer") or p.get("number") or p.get("numero")
+                     or p.get("los_nummer"))
+        rows.append((
+            fid,
+            egrid,
+            _to_int(p.get("bfs_nr") or p.get("bfsnr") or p.get("gemeinde_bfs")),
+            p.get("gemeinde") or p.get("commune") or p.get("gemeinde_name"),
+            str(parcel_no) if parcel_no is not None else None,
+            None,  # area computed authoritatively from geom in enrichment
+            json.dumps(f.get("geometry")),
+        ))
+    execute_batch(cur, sql, rows, page_size=500)
+    return len(rows)
+
+
+def load_buildings(cur, features: Iterable[dict]):
+    """
+    Load building footprints from the AV land-cover layer (LCSF).
+
+    LCSF contains ALL land-cover polygons (buildings, roads, water, vineyards...),
+    so we keep only the building class. The class is in an 'art'/'genauigkeit'/
+    'objektart' field; building values look like 'Gebaeude'/'batiment'/'edificio'.
+    Filtering here keeps the coverage-ratio calculation meaningful and cuts load
+    volume dramatically.
+    """
+    sql = f"""
+        INSERT INTO raw.buildings(bld_id, footprint_m2, geom)
+        VALUES (%s,%s,{_geom_sql()})
+    """
+    building_tokens = ("gebaeude", "gebäude", "batiment", "bâtiment",
+                       "edificio", "building")
+    rows = []
+    kept = 0
+    for f in features:
+        p = f.get("properties", {})
+        art = str(p.get("art") or p.get("objektart") or p.get("genre")
+                  or p.get("type") or "").lower()
+        if not any(tok in art for tok in building_tokens):
+            continue
+        kept += 1
+        rows.append((
+            str(f.get("id") or ""),
+            None,  # footprint computed from geom in enrichment
+            json.dumps(f.get("geometry")),
+        ))
+    execute_batch(cur, sql, rows, page_size=500)
+    return kept
+
+
 def load_generic(cur, table: str, features: Iterable[dict], columns: list[str]):
     """
     Generic loader for layers where we only keep an id + geometry
