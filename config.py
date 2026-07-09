@@ -51,6 +51,7 @@ SOURCES = {
         "ogcapi": f"{GEODIENSTE}/av_0/deu/ogcapi",
         "collection": "RESF",            # Liegenschaften = legal parcels
         "collection_keywords": ["liegenschaft", "resf"],
+        "cql_filter": "Kanton='VD'",     # server-side Vaud filter (falls back if unsupported)
         "raw_table": "raw.parcels",
     },
     "buildings": {
