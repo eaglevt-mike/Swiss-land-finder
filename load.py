@@ -13,7 +13,8 @@ from typing import Iterable
 import psycopg2
 from psycopg2.extras import execute_batch
 
-from config import DATABASE_URL, BUILDING_ZONE_TOKENS, NON_BUILDING_TOKENS
+from config import (DATABASE_URL, BUILDING_ZONE_TOKENS, NON_BUILDING_TOKENS,
+                    CANTON as TARGET_CANTON)
 
 
 def connect():
@@ -99,23 +100,33 @@ def load_parcels(cur, features: Iterable[dict]):
         VALUES (%s,%s,%s,%s,%s,%s,{_geom_sql()})
     """
     rows = []
+    skipped = 0
     for f in features:
         p = f.get("properties", {})
-        fid = str(f.get("id") or p.get("t_id") or p.get("identifikator") or "")
-        egrid = (p.get("egris_egrid") or p.get("egrid") or p.get("nbident")
-                 or (f"SYN-{fid}" if fid else None))
-        parcel_no = (p.get("nummer") or p.get("number") or p.get("numero")
-                     or p.get("los_nummer"))
+        # Real AV RESF field names (confirmed from live data):
+        # BFSNr, EGRIS_EGRID, Flaeche, Kanton, Nummer, NBIdent, Vollstaendigkeit
+        # The canton bbox also catches Geneva/Fribourg parcels, so keep only VD.
+        if TARGET_CANTON and str(p.get("Kanton", "")).upper() != TARGET_CANTON:
+            skipped += 1
+            continue
+        fid = str(f.get("id") or p.get("NBIdent") or "")
+        egrid = p.get("EGRIS_EGRID") or (f"SYN-{fid}" if fid else None)
+        parcel_no = p.get("Nummer")
+        bfs = _to_int(p.get("BFSNr"))
+        area = p.get("Flaeche")
         rows.append((
             fid,
             egrid,
-            _to_int(p.get("bfs_nr") or p.get("bfsnr") or p.get("gemeinde_bfs")),
-            p.get("gemeinde") or p.get("commune") or p.get("gemeinde_name"),
+            bfs,
+            p.get("Kanton"),          # store canton code in commune_name slot for now
             str(parcel_no) if parcel_no is not None else None,
-            None,  # area computed authoritatively from geom in enrichment
+            _to_float(area),          # official recorded area; geom area computed in enrich
             json.dumps(f.get("geometry")),
         ))
     execute_batch(cur, sql, rows, page_size=500)
+    if skipped:
+        print(f"    (parcels: kept {len(rows)}, skipped {skipped} outside {TARGET_CANTON})",
+              flush=True)
     return len(rows)
 
 
@@ -236,5 +247,12 @@ def detect_changes(cur):
 def _to_int(v):
     try:
         return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(v):
+    try:
+        return float(v)
     except (TypeError, ValueError):
         return None
