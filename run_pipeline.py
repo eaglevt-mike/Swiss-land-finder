@@ -44,26 +44,30 @@ def fetch_and_load_all(conn):
     # controlled for Vaud this returns 0 and we log a clear hint.
     log("fetching cadastral parcels (AV)...")
     L.truncate_raw(cur, "raw.parcels")
+    conn.commit()
     try:
         n = L.load_parcels(cur, F.fetch_layer(SOURCES["parcels"]))
+        conn.commit()
     except Exception as e:
+        conn.rollback()
         n = 0
         log(f"  parcels: fetch failed ({e})")
     log(f"  parcels: {n}")
     if n == 0:
         log("  [hint] AV parcels may require cantonal authorization on "
             "geodienste; if so, use the viageo.ch export fallback.")
-    conn.commit()
 
     log("fetching buildings (AV land cover)...")
     L.truncate_raw(cur, "raw.buildings")
+    conn.commit()
     try:
         n = L.load_buildings(cur, F.fetch_layer(SOURCES["buildings"]))
+        conn.commit()
     except Exception as e:
+        conn.rollback()
         n = 0
-        log(f"  buildings: fetch failed ({e})")
+        log(f"  buildings: fetch failed ({e}); continuing without buildings")
     log(f"  buildings: {n}")
-    conn.commit()
 
     log("fetching zoning...")
     L.truncate_raw(cur, "raw.zoning")
