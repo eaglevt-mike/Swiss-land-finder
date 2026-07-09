@@ -26,6 +26,8 @@ SQL_DIR = Path(__file__).resolve().parent
 SCHEMA = SQL_DIR / "001_schema.sql"
 ENRICH = SQL_DIR / "002_enrich.sql"
 SCORE = SQL_DIR / "003_score.sql"
+PHASEA_SCHEMA = SQL_DIR / "A01_phasea_schema.sql"
+PHASEA_BUILD = SQL_DIR / "A02_phasea_build.sql"
 
 
 def log(msg: str):
@@ -94,11 +96,33 @@ def fetch_and_load_all(conn):
 
 def enrich_and_score(conn):
     cur = conn.cursor()
-    L.run_sql_file(cur, str(ENRICH)); log("enriched")
-    L.run_sql_file(cur, str(SCORE));  log("scored")
-    changed = L.detect_changes(cur)
-    conn.commit(); cur.close()
-    log(f"change detection: {changed} parcels changed/new")
+    # Phase A: zoning-only opportunity ranking. Runs first and independently of
+    # parcels, so it produces ranked areas even when parcels are unavailable.
+    try:
+        L.run_sql_file(cur, str(PHASEA_SCHEMA))
+        L.run_sql_file(cur, str(PHASEA_BUILD))
+        conn.commit()
+        cur.execute("SELECT count(*) FROM core.zone_opportunity WHERE opportunity_score > 0")
+        nz = cur.fetchone()[0]
+        cur.execute("SELECT count(*) FROM core.commune_opportunity")
+        nc = cur.fetchone()[0]
+        log(f"Phase A: {nz} scored zones across {nc} communes")
+    except Exception as e:
+        conn.rollback()
+        log(f"Phase A ranking failed ({e})")
+
+    # Parcel-level enrichment/scoring (only meaningful once parcels are loaded).
+    try:
+        L.run_sql_file(cur, str(ENRICH)); log("enriched")
+        L.run_sql_file(cur, str(SCORE));  log("scored")
+        changed = L.detect_changes(cur)
+        conn.commit()
+        log(f"change detection: {changed} parcels changed/new")
+    except Exception as e:
+        conn.rollback()
+        changed = 0
+        log(f"parcel scoring skipped ({e})")
+    cur.close()
     return changed
 
 
