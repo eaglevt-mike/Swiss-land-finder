@@ -94,3 +94,27 @@ def sample_props(coll, want_tokens=None, n_scan=200):
 
 sample_props("LCSF")   # land cover — find the building class field/value
 sample_props("RESF")   # parcels — confirm the commune BFS field name
+
+# --- Part 3: dump real zoning (affectation_primaire) label values ----------
+ZON = "https://geodienste.ch/db/npl_nutzungsplanung_v1_2_0/fra/ogcapi"
+def sample_zoning(n_scan=300):
+    url = f"{ZON}/collections/affectation_primaire/items"
+    try:
+        r = requests.get(url, params={"f": "json", "limit": n_scan, "bbox": WGS84_CANTON},
+                         headers=UA, timeout=90)
+        data = r.json()
+        feats = data.get("features", [])
+        print(f"\n=== affectation_primaire: {len(feats)} sampled ===")
+        if not feats:
+            return
+        keys = sorted({k for f in feats for k in (f.get('properties') or {}).keys()})
+        print("property keys:", keys)
+        print("example:", json.dumps(feats[0].get('properties'), ensure_ascii=False)[:400])
+        for k in keys:
+            vals = {str((f.get('properties') or {}).get(k)) for f in feats}
+            if len(vals) <= 40:
+                print(f"  distinct {k} ({len(vals)}): {sorted(vals)}")
+    except Exception as e:
+        print(f"[ERR] zoning: {e}")
+
+sample_zoning()
