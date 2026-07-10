@@ -19,12 +19,11 @@ import requests
 
 from config import PAGE_LIMIT, REQUEST_TIMEOUT, USER_AGENT, PILOT_ONLY
 
-# WGS84 lon/lat box. NOTE: the full canton box also catches Geneva (SW) and bits
-# of neighbouring cantons. For parcels (a huge nationwide layer) that means lots
-# of wrong-canton download, so we bias the box toward Vaud proper. Lausanne is at
-# 6.63E, 46.52N; Vaud extends roughly 6.1-7.24E, 46.4-47.01N. This still includes
-# some Geneva/Fribourg edge, which the loader's Kanton='VD' filter removes.
-VAUD_BBOX_WGS84 = (6.10, 46.40, 7.24, 47.01)
+# WGS84 lon/lat box. With parcels/buildings off by default (Phase A uses zoning
+# only), there's no volume pressure, so we use the FULL canton box that returned
+# the complete ~25,900 Vaud zoning polygons. The earlier Geneva-excluding box was
+# only needed to reduce parcel volume and was cutting off western Vaud zoning.
+VAUD_BBOX_WGS84 = (6.06, 46.19, 7.24, 47.01)
 
 # Greater Lausanne in WGS84. NOTE: a *small* WGS84 box previously returned zero
 # for some layers, so the pilot restriction is now enforced by the feature CAP
