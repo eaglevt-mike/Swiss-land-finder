@@ -95,6 +95,10 @@ WHERE COALESCE(developable_m2, 0) = 0;
 
 -- ---------------------------------------------------------------------------
 -- 6) Aggregate to commune for the promoter shortlist.
+--    Zoning from geodienste has no direct BFS; until it's resolved via spatial
+--    join (Phase B), commune_bfs may be NULL. In that case this produces a
+--    single canton-wide summary row (bfs = -1), which is still useful, and the
+--    zone-level ranking (the core output) is unaffected.
 -- ---------------------------------------------------------------------------
 TRUNCATE core.commune_opportunity;
 
@@ -102,22 +106,19 @@ INSERT INTO core.commune_opportunity
     (commune_bfs, n_building_zones, total_developable_m2, n_in_plan_revision,
      largest_zone_m2, top_zone_score, commune_score)
 SELECT
-    commune_bfs,
+    COALESCE(commune_bfs, -1),
     COUNT(*),
     SUM(developable_m2),
     COUNT(*) FILTER (WHERE in_planning_zone),
     MAX(developable_m2),
     MAX(opportunity_score),
-    -- commune score blends: best single zone, breadth of opportunity, and
-    -- plan-revision activity. Normalised to 0-100.
     LEAST(100,
         0.5 * MAX(opportunity_score)
-      + 0.3 * LEAST(100, SUM(developable_m2) / 5000.0)      -- breadth
+      + 0.3 * LEAST(100, SUM(developable_m2) / 5000.0)
       + 0.2 * LEAST(100, COUNT(*) FILTER (WHERE in_planning_zone) * 20.0)
     )
 FROM core.zone_opportunity
-WHERE commune_bfs IS NOT NULL
-GROUP BY commune_bfs;
+GROUP BY COALESCE(commune_bfs, -1);
 
 -- Headline pitch per commune.
 UPDATE core.commune_opportunity
