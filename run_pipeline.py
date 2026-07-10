@@ -42,34 +42,14 @@ def ensure_schema(cur):
 def fetch_and_load_all(conn):
     cur = conn.cursor()
 
-    # Parcels first — everything else enriches onto them. If AV is access-
-    # controlled for Vaud this returns 0 and we log a clear hint.
-    log("fetching cadastral parcels (AV)...")
-    L.truncate_raw(cur, "raw.parcels")
-    conn.commit()
-    try:
-        n = L.load_parcels(cur, F.fetch_layer(SOURCES["parcels"]))
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        n = 0
-        log(f"  parcels: fetch failed ({e})")
-    log(f"  parcels: {n}")
-    if n == 0:
-        log("  [hint] AV parcels may require cantonal authorization on "
-            "geodienste; if so, use the viageo.ch export fallback.")
-
-    log("fetching buildings (AV land cover)...")
-    L.truncate_raw(cur, "raw.buildings")
-    conn.commit()
-    try:
-        n = L.load_buildings(cur, F.fetch_layer(SOURCES["buildings"]))
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        n = 0
-        log(f"  buildings: fetch failed ({e}); continuing without buildings")
-    log(f"  buildings: {n}")
+    # Parcels & buildings from the live AV endpoint stream the whole country and
+    # can't reach Vaud in reasonable time (see project notes). Phase A needs only
+    # zoning/planning/forest, so these are OFF by default. Set FETCH_PARCELS=true
+    # to re-enable (e.g. once a targeted per-commune fetch is built in Phase B).
+    if os.getenv("FETCH_PARCELS", "false").lower() == "true":
+        _fetch_parcels_and_buildings(conn, cur)
+    else:
+        log("skipping parcels+buildings (FETCH_PARCELS not set) — Phase A uses zoning only")
 
     log("fetching zoning...")
     L.truncate_raw(cur, "raw.zoning")
@@ -92,6 +72,34 @@ def fetch_and_load_all(conn):
 
     conn.commit()
     cur.close()
+
+
+def _fetch_parcels_and_buildings(conn, cur):
+    """Optional AV parcels + buildings fetch. Off by default (streams nationwide,
+    can't reach VD in budget). Kept for the Phase B per-commune approach."""
+    log("fetching cadastral parcels (AV)...")
+    L.truncate_raw(cur, "raw.parcels")
+    conn.commit()
+    try:
+        n = L.load_parcels(cur, F.fetch_layer(SOURCES["parcels"]))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        n = 0
+        log(f"  parcels: fetch failed ({e})")
+    log(f"  parcels: {n}")
+
+    log("fetching buildings (AV land cover)...")
+    L.truncate_raw(cur, "raw.buildings")
+    conn.commit()
+    try:
+        n = L.load_buildings(cur, F.fetch_layer(SOURCES["buildings"]))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        n = 0
+        log(f"  buildings: fetch failed ({e}); continuing without buildings")
+    log(f"  buildings: {n}")
 
 
 def enrich_and_score(conn):
