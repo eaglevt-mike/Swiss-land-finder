@@ -14,7 +14,7 @@ import psycopg2
 from psycopg2.extras import execute_batch
 
 from config import (DATABASE_URL, BUILDING_ZONE_TOKENS, NON_BUILDING_TOKENS,
-                    CANTON as TARGET_CANTON)
+                    BUILDING_ZONE_CODES, CANTON as TARGET_CANTON)
 
 
 def connect():
@@ -48,29 +48,48 @@ def truncate_raw(cur, table: str):
 
 
 def load_zoning(cur, features: Iterable[dict]):
-    """raw.zoning: derive is_building_zone from the harmonized primary use."""
+    """Load zoning polygons using the real affectation_primaire fields.
+
+    Confirmed live fields: affectation_principale_code (federal build-zone code),
+    affectation_principale_designation, canton, type_canton_designation, t_id.
+    The canton box catches several cantons, so we keep only TARGET_CANTON.
+    """
     sql = f"""
         INSERT INTO raw.zoning(zone_id, commune_bfs, typ_kt, hauptnutzung,
                                is_building_zone, geom)
         VALUES (%s,%s,%s,%s,%s,{_geom_sql()})
     """
     rows = []
+    skipped = 0
     for f in features:
         p = f.get("properties", {})
-        # The harmonized primary-use label appears under one of these keys
-        # depending on model version and endpoint language.
-        use = (p.get("typ_kt") or p.get("hauptnutzung") or p.get("primary_use")
-               or p.get("typ_code") or p.get("code") or "")
+        if TARGET_CANTON and str(p.get("canton", "")).upper() != TARGET_CANTON:
+            skipped += 1
+            continue
+        code = p.get("affectation_principale_code")
+        zone_label = (p.get("type_canton_designation")
+                      or p.get("affectation_principale_designation") or "")
         rows.append((
             str(f.get("id") or p.get("t_id") or ""),
-            _to_int(p.get("bfs_nr") or p.get("commune_bfs") or p.get("bfsnr")),
-            p.get("typ_kt") or p.get("typ_code"),
-            use,
-            _is_building_zone(use),
+            None,   # no direct BFS in zoning; resolved via spatial join later
+            zone_label,                                   # typ_kt: readable zone type
+            p.get("affectation_principale_designation"),  # hauptnutzung: primary use
+            _is_building_zone_code(code),
             json.dumps(f.get("geometry")),
         ))
     execute_batch(cur, sql, rows, page_size=500)
+    if skipped:
+        print(f"    (zoning: kept {len(rows)}, skipped {skipped} outside {TARGET_CANTON})",
+              flush=True)
     return len(rows)
+
+
+def _is_building_zone_code(code) -> bool:
+    """Authoritative build-zone test using the federal affectation code."""
+    try:
+        return int(code) in BUILDING_ZONE_CODES
+    except (TypeError, ValueError):
+        return False
 
 
 def _is_building_zone(use) -> bool:
