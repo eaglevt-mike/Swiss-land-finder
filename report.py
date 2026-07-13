@@ -25,7 +25,7 @@ def main():
                count(DISTINCT commune_bfs)
         FROM core.zone_opportunity
     """)
-    total, scored, ha, communes = cur.fetchone()
+    total, scored, ha, communes = [x or 0 for x in cur.fetchone()]
     print(f"\n{scored} scored building zones · {ha} ha developable · "
           f"{communes} communes\n")
 
@@ -51,11 +51,12 @@ def main():
     # --- Top individual zones ----------------------------------------------
     print()
     print("-" * 78)
-    print("TOP 20 TARGET ZONES — D4A/D4B mid-density (the actual leads)")
+    print("TOP 20 LEADS — underbuilt D4A/D4B zones (Phase B)")
     print("-" * 78)
     cur.execute("""
-        SELECT commune_name, zone_type, zone_code, zone_tier, height_limit_m,
+        SELECT commune_name, zone_code, height_limit_m,
                round(developable_m2), round(opportunity_score::numeric, 0),
+               round(utilisation_pct::numeric), n_buildings, n_raisable,
                score_reasons
         FROM core.zone_opportunity
         WHERE opportunity_score > 0 AND zone_tier = 'target'
@@ -65,13 +66,35 @@ def main():
     rows = cur.fetchall()
     if not rows:
         print("  (no TARGET (D4A/D4B) zones found)")
-    for i, (commune, ztype, code, tier, h, dev, score, reasons) in enumerate(rows, 1):
-        print(f"\n{i:>2}. {str(commune or '?'):<18} score {score}   [{code}]")
-        print(f"    {str(ztype or '?')[:60]}")
-        print(f"    {int(dev or 0):,} m²  ({(dev or 0)/10000:.1f} ha)"
-              + (f"   height limit {h}m" if h else ""))
+    for i, (commune, code, h, dev, score, util, nb, rais, reasons) in enumerate(rows, 1):
+        util_s = f"{int(util)}% built" if util is not None else "?"
+        print(f"\n{i:>2}. {str(commune or '?'):<18} score {score}   [{code}]  {util_s}")
+        print(f"    {int(dev or 0):,} m² ({(dev or 0)/10000:.1f} ha)"
+              + (f" · {h}m limit" if h else "")
+              + f" · {nb or 0} buildings"
+              + (f" · {rais} RAISABLE" if rais else ""))
         if reasons:
-            print(f"    why: {reasons}")
+            print(f"    {reasons}")
+
+    # --- Underuse summary ---------------------------------------------------
+    print()
+    print("-" * 78)
+    print("UNDERUSE SUMMARY — where the real headroom is")
+    print("-" * 78)
+    cur.execute("""
+        SELECT
+          count(*) FILTER (WHERE zone_tier='target' AND n_buildings = 0),
+          count(*) FILTER (WHERE zone_tier='target' AND utilisation_pct < 40
+                                 AND n_buildings > 0),
+          count(*) FILTER (WHERE zone_tier='target' AND utilisation_pct >= 80),
+          COALESCE(sum(n_raisable), 0)
+        FROM core.zone_opportunity
+    """)
+    empty, under, full, rais = [x or 0 for x in cur.fetchone()]
+    print(f"  {empty:>4} target zones are EMPTY (no buildings) — prime sites")
+    print(f"  {under:>4} target zones are UNDERBUILT (<40% of permitted density)")
+    print(f"  {full:>4} target zones are effectively FULL (>=80%) — skip these")
+    print(f"  {rais:>4} buildings the canton says CAN BE RAISED (surelevation)")
 
     # --- Zone-type mix ------------------------------------------------------
     print()
@@ -96,4 +119,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        print("\n[REPORT ERROR] " + str(e))
+        traceback.print_exc()
