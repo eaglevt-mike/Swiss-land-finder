@@ -25,8 +25,13 @@ CREATE TABLE core.zone_opportunity (
     zone_uid          bigserial PRIMARY KEY,
     zone_id           text,
     commune_bfs       integer,
+    commune_name      text,
     zone_type         text,
     primary_use       text,
+    zone_code         text,                      -- GE code: D4A, D3, 5, DIA...
+    height_limit_m    integer,                   -- gabarit from DESCRIPTION
+    density_indice    text,                      -- GE INDICE field
+    zone_tier         text,                      -- target | secondary | avoid
     geom              geometry(MultiPolygon, 2056),
 
     area_m2           double precision,          -- zone polygon area
