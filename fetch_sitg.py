@@ -12,6 +12,7 @@ Confirmed live fields (from diag_sources.py):
     SHAPE.AREA, ZONE_PREEXISTANTE, RESTRICTION, DS_OPB
 """
 from __future__ import annotations
+import json
 import time
 from typing import Iterator
 import requests
@@ -95,3 +96,80 @@ if __name__ == "__main__":
         if n >= 5:
             break
     print("sampled OK")
+
+
+# ============================================================================
+# Phase B — building footprints + Geneva's surélévation layer.
+# ============================================================================
+SITG_BUILDINGS = ("https://vector.sitg.ge.ch/arcgis/rest/services/"
+                  "CAD_BATIMENT_HORSOL/MapServer/0/query")
+SITG_SURELEV = ("https://vector.sitg.ge.ch/arcgis/rest/services/"
+                "SIT_SURELEVATION_BATIMENT/MapServer/0/query")
+
+
+def _get_url(url: str, params: dict) -> dict:
+    timeout = (15, REQUEST_TIMEOUT)
+    for attempt in range(3):
+        try:
+            r = _session.get(url, params=params, timeout=timeout)
+            if r.status_code == 200:
+                return r.json()
+            if r.status_code in (429, 502, 503, 504):
+                time.sleep(2 ** attempt)
+                continue
+            r.raise_for_status()
+        except requests.RequestException:
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
+    raise RuntimeError(f"SITG request failed: {url}")
+
+
+def _page_all(url: str, extra: dict, label: str) -> Iterator[dict]:
+    """Page an ArcGIS layer, yielding GeoJSON features in LV95."""
+    offset, total = 0, 0
+    while True:
+        params = {
+            "outFields": "*", "returnGeometry": "true", "outSR": 2056,
+            "resultOffset": offset, "resultRecordCount": SITG_PAGE,
+            "f": "geojson",
+        }
+        params.update(extra)
+        data = _get_url(url, params)
+        feats = data.get("features", [])
+        if not feats:
+            break
+        for f in feats:
+            yield f
+        total += len(feats)
+        offset += len(feats)
+        print(f"    ...{label}: {total} features", flush=True)
+        if len(feats) < SITG_PAGE and not data.get("exceededTransferLimit"):
+            break
+        if total > 120000:
+            print(f"    [warn] {label}: volume ceiling, stopping", flush=True)
+            break
+
+
+def fetch_buildings_in_envelope(xmin, ymin, xmax, ymax) -> Iterator[dict]:
+    """
+    Fetch building footprints intersecting a bounding envelope (LV95).
+
+    We do NOT pull all 83,004 canton buildings. The caller passes the envelope
+    of the target (D4A/D4B) zones, so we retrieve only the relevant subset.
+    """
+    envelope = {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax,
+                "spatialReference": {"wkid": 2056}}
+    extra = {
+        "where": "1=1",
+        "geometry": json.dumps(envelope),
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": 2056,
+        "spatialRel": "esriSpatialRelIntersects",
+    }
+    yield from _page_all(SITG_BUILDINGS, extra, "buildings")
+
+
+def fetch_surelevation() -> Iterator[dict]:
+    """Geneva's own 'can be raised' layer — only 1,034 features, pull them all."""
+    yield from _page_all(SITG_SURELEV, {"where": "1=1"}, "surelevation")
