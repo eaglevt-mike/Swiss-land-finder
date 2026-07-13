@@ -18,6 +18,7 @@ from pathlib import Path
 from config import SOURCES
 import load as L
 import fetch_ogcapi as F
+import fetch_sitg as FS
 import fetch_oereb as O
 
 # resolve SQL files next to this script, whatever the working directory is,
@@ -51,24 +52,42 @@ def fetch_and_load_all(conn):
     else:
         log("skipping parcels+buildings (FETCH_PARCELS not set) — Phase A uses zoning only")
 
-    log("fetching zoning...")
+    log("fetching Geneva zoning (SITG)...")
     L.truncate_raw(cur, "raw.zoning")
-    n = L.load_zoning(cur, F.fetch_layer(SOURCES["zoning"]))
-    log(f"  zoning: {n} polygons")
+    try:
+        total = FS.count_features()
+        log(f"  SITG reports {total} zoning features for Geneva")
+        n = L.load_zoning_sitg(cur, FS.fetch_zoning())
+        conn.commit()
+        log(f"  zoning: {n} polygons loaded")
+    except Exception as e:
+        conn.rollback()
+        log(f"  zoning fetch FAILED ({e})")
 
-    log("fetching planning zones...")
-    L.truncate_raw(cur, "raw.planning_zones")
-    n = L.load_generic(cur, "raw.planning_zones",
-                       F.fetch_layer(SOURCES["planning_zones"]),
-                       columns=["pz_id", "commune_bfs", "status"])
-    log(f"  planning zones: {n}")
+    # Planning zones + forest still come from geodienste (national). They are
+    # supplementary signals only; Phase A's core signal is the Geneva building
+    # zones above. Non-fatal: a failure here must not block the ranking.
+    if os.getenv("FETCH_SUPPLEMENTARY", "false").lower() == "true":
+        try:
+            log("fetching planning zones...")
+            L.truncate_raw(cur, "raw.planning_zones")
+            n = L.load_generic(cur, "raw.planning_zones",
+                               F.fetch_layer(SOURCES["planning_zones"]),
+                               columns=["pz_id", "commune_bfs", "status"])
+            log(f"  planning zones: {n}")
 
-    log("fetching forest...")
-    L.truncate_raw(cur, "raw.forest")
-    n = L.load_generic(cur, "raw.forest",
-                       F.fetch_layer(SOURCES["forest"]),
-                       columns=["fg_id"])
-    log(f"  forest: {n}")
+            log("fetching forest...")
+            L.truncate_raw(cur, "raw.forest")
+            n = L.load_generic(cur, "raw.forest",
+                               F.fetch_layer(SOURCES["forest"]),
+                               columns=["fg_id"])
+            log(f"  forest: {n}")
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            log(f"  supplementary layers skipped ({e})")
+    else:
+        log("skipping supplementary layers (FETCH_SUPPLEMENTARY not set)")
 
     conn.commit()
     cur.close()
