@@ -30,6 +30,8 @@ ENRICH = SQL_DIR / "002_enrich.sql"
 SCORE = SQL_DIR / "003_score.sql"
 PHASEA_SCHEMA = SQL_DIR / "A01_phasea_schema.sql"
 PHASEA_BUILD = SQL_DIR / "A02_phasea_build.sql"
+PHASEB_SCHEMA = SQL_DIR / "B01_phaseb_schema.sql"
+PHASEB_BUILD = SQL_DIR / "B02_phaseb_build.sql"
 
 
 def log(msg: str):
@@ -128,6 +130,76 @@ def _fetch_parcels_and_buildings(conn, cur):
     log(f"  buildings: {n}")
 
 
+def run_phase_b(conn):
+    """
+    Phase B — the underuse signal.
+
+    Fetch building footprints ONLY within the envelope of our target zones (not
+    all 83,004 canton buildings), plus Geneva's own 'surelevation' layer, then
+    compute built-vs-permitted floor area per zone.
+    """
+    cur = conn.cursor()
+    try:
+        L.run_sql_file(cur, str(PHASEB_SCHEMA))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        log(f"Phase B schema failed ({e})")
+        cur.close()
+        return
+
+    # Envelope of the zones we actually care about.
+    cur.execute("""
+        SELECT ST_XMin(e), ST_YMin(e), ST_XMax(e), ST_YMax(e)
+        FROM (SELECT ST_Extent(geom) AS e FROM core.zone_opportunity
+              WHERE zone_tier IN ('target','secondary')) t
+    """)
+    row = cur.fetchone()
+    if not row or row[0] is None:
+        log("Phase B: no target zones yet, skipping")
+        cur.close()
+        return
+    xmin, ymin, xmax, ymax = row
+    log(f"Phase B: fetching buildings in envelope "
+        f"({int(xmin)},{int(ymin)})-({int(xmax)},{int(ymax)})")
+
+    try:
+        cur.execute("TRUNCATE raw.buildings_ge;")
+        conn.commit()
+        n = L.load_buildings_ge(
+            cur, FS.fetch_buildings_in_envelope(xmin, ymin, xmax, ymax))
+        conn.commit()
+        log(f"  buildings: {n} footprints loaded")
+    except Exception as e:
+        conn.rollback()
+        log(f"  buildings fetch failed ({e})")
+
+    try:
+        cur.execute("TRUNCATE raw.surelevation;")
+        conn.commit()
+        n = L.load_surelevation(cur, FS.fetch_surelevation())
+        conn.commit()
+        log(f"  surelevation: {n} raisable buildings loaded")
+    except Exception as e:
+        conn.rollback()
+        log(f"  surelevation fetch failed ({e})")
+
+    try:
+        L.run_sql_file(cur, str(PHASEB_BUILD))
+        conn.commit()
+        cur.execute("""SELECT count(*) FROM core.zone_opportunity
+                       WHERE zone_tier='target' AND utilisation_pct < 40""")
+        leads = cur.fetchone()[0]
+        cur.execute("SELECT count(*) FROM core.zone_opportunity WHERE n_raisable > 0")
+        rais = cur.fetchone()[0]
+        log(f"Phase B: {leads} UNDERBUILT target zones (<40% utilised), "
+            f"{rais} zones with raisable buildings")
+    except Exception as e:
+        conn.rollback()
+        log(f"Phase B scoring failed ({e})")
+    cur.close()
+
+
 def enrich_and_score(conn):
     cur = conn.cursor()
     # Phase A: zoning-only opportunity ranking. Runs first and independently of
@@ -144,6 +216,10 @@ def enrich_and_score(conn):
     except Exception as e:
         conn.rollback()
         log(f"Phase A ranking failed ({e})")
+
+    # Phase B: underuse signal (buildings vs permitted density).
+    if os.getenv("SKIP_PHASE_B", "false").lower() != "true":
+        run_phase_b(conn)
 
     # Parcel-level enrichment/scoring (only meaningful once parcels are loaded).
     try:
