@@ -42,9 +42,12 @@ DROP TABLE IF EXISTS raw.zoning CASCADE;
 CREATE TABLE raw.zoning (
     zone_id       text,
     commune_bfs   integer,
-    typ_kt        text,                    -- cantonal zone type label
-    hauptnutzung  text,                    -- one of 9 harmonized primary uses
-    is_building_zone boolean,              -- derived on load (see fetcher)
+    typ_kt        text,                    -- zone type label (GE: NOM_ZONE)
+    hauptnutzung  text,                    -- commune name (GE: COMMUNE)
+    is_building_zone boolean,              -- derived on load
+    zone_code     text,                    -- GE zone code: D4A, D3, 5, DIA...
+    height_limit_m integer,                -- gabarit parsed from DESCRIPTION
+    density_indice text,                   -- GE INDICE field
     geom          geometry(MultiPolygon, 2056) NOT NULL
 );
 
