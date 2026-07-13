@@ -9,6 +9,7 @@ perfectly configured.
 """
 from __future__ import annotations
 import json
+import re
 from typing import Iterable
 import psycopg2
 from psycopg2.extras import execute_batch
@@ -95,32 +96,50 @@ def _is_building_zone_code(code) -> bool:
 
 def load_zoning_sitg(cur, features: Iterable[dict]):
     """
-    Load Geneva zoning from SITG. Unlike geodienste, this gives us commune names,
-    BFS numbers, and a density INDICE — everything Phase A wants.
+    Load Geneva zoning from SITG, capturing the density signals: zone code,
+    height limit (gabarit, parsed from DESCRIPTION), and the INDICE field.
 
-    Real fields (confirmed live): COMMUNE, NO_COMM_FEDERAL, ZONE, NOM_ZONE,
-    DESCRIPTION, INDICE, RESTRICTION.
+    Height limit is our best available proxy for permitted density — Geneva's
+    own descriptions state it explicitly (24m Zone 2, 21m Zone 3, 10m villa
+    Zone 5) — and it's what separates a real development site from a villa plot.
     """
     sql = f"""
         INSERT INTO raw.zoning(zone_id, commune_bfs, typ_kt, hauptnutzung,
-                               is_building_zone, geom)
-        VALUES (%s,%s,%s,%s,%s,{_geom_sql()})
+                               is_building_zone, zone_code, height_limit_m,
+                               density_indice, geom)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,{_geom_sql()})
     """
     rows = []
     for f in features:
         p = f.get("properties", {})
-        zone_code = p.get("ZONE") or ""
+        zone_code = (p.get("ZONE") or "").strip()
         zone_name = p.get("NOM_ZONE") or ""
         rows.append((
             str(p.get("OBJECTID") or f.get("id") or ""),
-            _to_int(p.get("NO_COMM_FEDERAL")),       # real BFS number!
-            zone_name,                                # readable zone type
-            p.get("COMMUNE"),                         # commune name
+            _to_int(p.get("NO_COMM_FEDERAL")),
+            zone_name,
+            p.get("COMMUNE"),
             _is_building_zone_ge(zone_code, zone_name),
+            zone_code,
+            _parse_height(p.get("DESCRIPTION")),
+            p.get("INDICE"),
             json.dumps(f.get("geometry")),
         ))
     execute_batch(cur, sql, rows, page_size=500)
     return len(rows)
+
+
+def _parse_height(description) -> int | None:
+    """
+    Pull the height limit (gabarit) out of Geneva's DESCRIPTION text.
+    Real examples: "(gabarit max. 21 m)", "gabarit maximum 24 m",
+    "(gabarit max.15 m)". Returns metres, or None if absent.
+    """
+    if not description:
+        return None
+    m = re.search(r"gabarit\s+max(?:imum)?\.?\s*(\d{1,2})\s*m",
+                  str(description), flags=re.IGNORECASE)
+    return int(m.group(1)) if m else None
 
 
 def _is_building_zone_ge(code, name) -> bool:
