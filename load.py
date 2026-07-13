@@ -342,3 +342,58 @@ def _to_float(v):
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+# ============================================================================
+# Phase B loaders — building footprints + surélévation.
+# ============================================================================
+def load_buildings_ge(cur, features: Iterable[dict]):
+    """
+    Load Geneva building footprints. The key field is NIVEAUX_HORSOL (number of
+    above-ground floors) — it lets us compute BUILT FLOOR AREA (footprint x
+    floors), not just footprint, which is what makes the underuse signal real.
+    """
+    sql = f"""
+        INSERT INTO raw.buildings_ge(objectid, egid, commune, destination,
+            nomen_classe, niveaux_horsol, hauteur, annee_constr, footprint_m2, geom)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,{_geom_sql()})
+    """
+    rows = []
+    for f in features:
+        p = f.get("properties", {})
+        rows.append((
+            _to_int(p.get("OBJECTID")),
+            str(p.get("EGID")) if p.get("EGID") is not None else None,
+            p.get("COMMUNE"),
+            p.get("DESTINATION"),
+            p.get("NOMEN_CLASSE"),
+            _to_int(p.get("NIVEAUX_HORSOL")),
+            _to_float(p.get("HAUTEUR")),
+            _to_int(p.get("ANNEE_CONSTRUCTION")),
+            _to_float(p.get("SURFACE") or p.get("SHAPE.AREA")),
+            json.dumps(f.get("geometry")),
+        ))
+    execute_batch(cur, sql, rows, page_size=500)
+    return len(rows)
+
+
+def load_surelevation(cur, features: Iterable[dict]):
+    """Geneva's own layer of buildings legally raisable (LCI art. 23 & 27)."""
+    sql = f"""
+        INSERT INTO raw.surelevation(objectid, egid, commune, destination,
+                                     remarque, geom)
+        VALUES (%s,%s,%s,%s,%s,{_geom_sql()})
+    """
+    rows = []
+    for f in features:
+        p = f.get("properties", {})
+        rows.append((
+            _to_int(p.get("OBJECTID")),
+            str(p.get("EGID")) if p.get("EGID") is not None else None,
+            p.get("COMMUNE"),
+            p.get("DESTINATION"),
+            p.get("REMARQUE"),
+            json.dumps(f.get("geometry")),
+        ))
+    execute_batch(cur, sql, rows, page_size=500)
+    return len(rows)
