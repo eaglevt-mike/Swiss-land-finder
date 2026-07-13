@@ -14,7 +14,8 @@ import psycopg2
 from psycopg2.extras import execute_batch
 
 from config import (DATABASE_URL, BUILDING_ZONE_TOKENS, NON_BUILDING_TOKENS,
-                    BUILDING_ZONE_CODES, CANTON as TARGET_CANTON)
+                    BUILDING_ZONE_CODES, GENEVA_BUILD_PREFIXES,
+                    GENEVA_NONBUILD_TOKENS, CANTON as TARGET_CANTON)
 
 
 def connect():
@@ -85,11 +86,58 @@ def load_zoning(cur, features: Iterable[dict]):
 
 
 def _is_building_zone_code(code) -> bool:
-    """Authoritative build-zone test using the federal affectation code."""
+    """Federal affectation-code build-zone test (geodienste path)."""
     try:
         return int(code) in BUILDING_ZONE_CODES
     except (TypeError, ValueError):
         return False
+
+
+def load_zoning_sitg(cur, features: Iterable[dict]):
+    """
+    Load Geneva zoning from SITG. Unlike geodienste, this gives us commune names,
+    BFS numbers, and a density INDICE — everything Phase A wants.
+
+    Real fields (confirmed live): COMMUNE, NO_COMM_FEDERAL, ZONE, NOM_ZONE,
+    DESCRIPTION, INDICE, RESTRICTION.
+    """
+    sql = f"""
+        INSERT INTO raw.zoning(zone_id, commune_bfs, typ_kt, hauptnutzung,
+                               is_building_zone, geom)
+        VALUES (%s,%s,%s,%s,%s,{_geom_sql()})
+    """
+    rows = []
+    for f in features:
+        p = f.get("properties", {})
+        zone_code = p.get("ZONE") or ""
+        zone_name = p.get("NOM_ZONE") or ""
+        rows.append((
+            str(p.get("OBJECTID") or f.get("id") or ""),
+            _to_int(p.get("NO_COMM_FEDERAL")),       # real BFS number!
+            zone_name,                                # readable zone type
+            p.get("COMMUNE"),                         # commune name
+            _is_building_zone_ge(zone_code, zone_name),
+            json.dumps(f.get("geometry")),
+        ))
+    execute_batch(cur, sql, rows, page_size=500)
+    return len(rows)
+
+
+def _is_building_zone_ge(code, name) -> bool:
+    """
+    Geneva building-zone test. Geneva uses its own zone system (not the federal
+    codes). Buildable = ordinary zones 1-5 and all development ('D...') zones,
+    which permit housing/activity construction. Excluded: agricultural, forest,
+    protected, water, rail — identified by name tokens.
+    """
+    nm = str(name or "").lower()
+    if any(tok in nm for tok in GENEVA_NONBUILD_TOKENS):
+        return False
+    c = str(code or "").upper().strip()
+    if not c:
+        return False
+    # Development zones (D3, D4A, DAM, DIA...) and ordinary zones (1..5)
+    return c.startswith(GENEVA_BUILD_PREFIXES)
 
 
 def _is_building_zone(use) -> bool:
