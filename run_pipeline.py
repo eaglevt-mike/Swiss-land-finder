@@ -25,6 +25,7 @@ import fetch_oereb as O
 # so a flattened repo layout can't break the paths.
 SQL_DIR = Path(__file__).resolve().parent
 SCHEMA = SQL_DIR / "001_schema.sql"
+MIGRATE = SQL_DIR / "000_migrate.sql"
 ENRICH = SQL_DIR / "002_enrich.sql"
 SCORE = SQL_DIR / "003_score.sql"
 PHASEA_SCHEMA = SQL_DIR / "A01_phasea_schema.sql"
@@ -37,7 +38,13 @@ def log(msg: str):
 
 def ensure_schema(cur):
     L.run_sql_file(cur, str(SCHEMA))
-    log("schema ensured")
+    # Additive, idempotent column migrations. Runs after the schema file so the
+    # tables exist, and upgrades an older database in place (no manual reset).
+    try:
+        L.run_sql_file(cur, str(MIGRATE))
+        log("schema ensured (+ migrations)")
+    except Exception as e:
+        log(f"schema ensured (migration note: {e})")
 
 
 def fetch_and_load_all(conn):
