@@ -185,6 +185,15 @@ def run_phase_b(conn):
         log(f"  surelevation fetch failed ({e})")
 
     try:
+        # Guard: if no buildings loaded, every zone would look falsely "empty".
+        cur.execute("SELECT count(*) FROM raw.buildings_ge")
+        n_bld = cur.fetchone()[0]
+        if n_bld == 0:
+            log("Phase B: NO buildings loaded — skipping underuse scoring "
+                "(would falsely mark every zone as empty)")
+            cur.close()
+            return
+
         L.run_sql_file(cur, str(PHASEB_BUILD))
         conn.commit()
         cur.execute("""SELECT count(*) FROM core.zone_opportunity
