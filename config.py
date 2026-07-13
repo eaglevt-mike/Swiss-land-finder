@@ -24,8 +24,30 @@ PILOT_ONLY = os.getenv("PILOT_ONLY", "true").lower() == "true"
 # Collections are filtered per canton via the STAC/feature "canton" attribute.
 GEODIENSTE = "https://geodienste.ch/db"
 
-# Collection IDs below are the REAL geodienste ids (French domain names),
-# confirmed from each service's /collections endpoint — not the model slug.
+# =============================================================================
+# PRIMARY SOURCE: Geneva SITG (ArcGIS REST, returns GeoJSON).
+#
+# Why Geneva and not Vaud: geodienste cannot deliver VD zoning (proven — it
+# pages nationally in canton order and never reaches VD; every server-side
+# filter is ignored). Vaud's own geoservice is WMS-only (images, not features),
+# and the ASIT-VD WFS does not resolve. Geneva's SITG, by contrast, serves the
+# ENTIRE canton's zoning as 2,494 GeoJSON features in one query, with commune
+# names, BFS numbers, zone types and a density INDICE.
+# =============================================================================
+SITG_ZONING = ("https://vector.sitg.ge.ch/arcgis/rest/services/"
+               "SIT_ZONE_AMENAG/MapServer/0/query")
+SITG_PAGE = 1000          # server maxRecordCount is 4000; stay well under
+GENEVA_CANTON = "GE"
+
+# Geneva zone codes (field ZONE / NOM_ZONE). Geneva's system is its own, not the
+# federal code list. Building zones = ordinary + development zones where housing
+# or activity construction is permitted. Confirmed from live data.
+#   D3, D4A, D4AP, D4B, D4BP  development residential zones (buildable)
+#   DAM  development mixed-activity      DIA  development industrial/artisanal
+# Non-build examples: agricultural, forest, protected (appear as other codes).
+GENEVA_BUILD_PREFIXES = ("D", "1", "2", "3", "4", "5")   # dev + ordinary zones
+GENEVA_NONBUILD_TOKENS = ("agricole", "bois", "forêt", "foret", "protégée",
+                          "protegee", "verdure", "ferroviaire", "eaux")
 SOURCES = {
     "zoning": {
         "ogcapi": f"{GEODIENSTE}/npl_nutzungsplanung_v1_2_0/fra/ogcapi",
