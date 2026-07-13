@@ -36,38 +36,40 @@ def main():
     print(f"{'#':<3} {'Commune':<22} {'Score':>5} {'Zones':>6} {'Developable':>13}")
     print("-" * 78)
     cur.execute("""
-        SELECT co.commune_bfs,
-               COALESCE(MAX(zo.primary_use), '(bfs ' || co.commune_bfs || ')'),
-               round(co.commune_score::numeric, 0),
-               co.n_building_zones,
-               round((co.total_developable_m2/10000.0)::numeric, 1)
-        FROM core.commune_opportunity co
-        LEFT JOIN core.zone_opportunity zo ON zo.commune_bfs = co.commune_bfs
-        GROUP BY co.commune_bfs, co.commune_score, co.n_building_zones,
-                 co.total_developable_m2
-        ORDER BY co.commune_score DESC
+        SELECT COALESCE(commune_name, '(bfs ' || commune_bfs || ')'),
+               round(COALESCE(commune_score,0)::numeric, 0),
+               COALESCE(n_building_zones, 0),
+               round((COALESCE(total_developable_m2,0)/10000.0)::numeric, 1)
+        FROM core.commune_opportunity
+        WHERE COALESCE(commune_score,0) > 0
+        ORDER BY commune_score DESC
         LIMIT 15
     """)
-    for i, (bfs, name, score, nz, ha) in enumerate(cur.fetchall(), 1):
-        print(f"{i:<3} {str(name)[:22]:<22} {score:>5} {nz:>6} {ha:>10} ha")
+    for i, (name, score, nz, ha) in enumerate(cur.fetchall(), 1):
+        print(f"{i:<3} {str(name)[:22]:<22} {score:>5} {nz:>6} {ha:>8} ha")
 
     # --- Top individual zones ----------------------------------------------
     print()
     print("-" * 78)
-    print("TOP 20 INDIVIDUAL ZONES (the actual leads)")
+    print("TOP 20 TARGET ZONES — D4A/D4B mid-density (the actual leads)")
     print("-" * 78)
     cur.execute("""
-        SELECT primary_use, zone_type, round(developable_m2),
-               round(opportunity_score::numeric, 0), score_reasons
+        SELECT commune_name, zone_type, zone_code, zone_tier, height_limit_m,
+               round(developable_m2), round(opportunity_score::numeric, 0),
+               score_reasons
         FROM core.zone_opportunity
-        WHERE opportunity_score > 0
+        WHERE opportunity_score > 0 AND zone_tier = 'target'
         ORDER BY opportunity_score DESC
         LIMIT 20
     """)
-    for i, (commune, ztype, dev, score, reasons) in enumerate(cur.fetchall(), 1):
-        print(f"\n{i:>2}. {str(commune or '?'):<18} score {score}")
+    rows = cur.fetchall()
+    if not rows:
+        print("  (no TARGET (D4A/D4B) zones found)")
+    for i, (commune, ztype, code, tier, h, dev, score, reasons) in enumerate(rows, 1):
+        print(f"\n{i:>2}. {str(commune or '?'):<18} score {score}   [{code}]")
         print(f"    {str(ztype or '?')[:60]}")
-        print(f"    {int(dev):,} m²  ({dev/10000:.1f} ha)")
+        print(f"    {int(dev or 0):,} m²  ({(dev or 0)/10000:.1f} ha)"
+              + (f"   height limit {h}m" if h else ""))
         if reasons:
             print(f"    why: {reasons}")
 
@@ -77,15 +79,16 @@ def main():
     print("ZONE TYPE MIX (what kind of opportunities exist)")
     print("-" * 78)
     cur.execute("""
-        SELECT zone_type, count(*), round(sum(developable_m2)/10000.0)
+        SELECT zone_tier, zone_code, count(*),
+               round((sum(developable_m2)/10000.0)::numeric)
         FROM core.zone_opportunity
-        WHERE opportunity_score > 0
-        GROUP BY zone_type
-        ORDER BY count(*) DESC
-        LIMIT 12
+        GROUP BY zone_tier, zone_code
+        ORDER BY zone_tier, count(*) DESC
     """)
-    for ztype, n, ha in cur.fetchall():
-        print(f"  {n:>4} zones · {int(ha or 0):>5} ha · {str(ztype)[:50]}")
+    for tier, code, n, ha in cur.fetchall():
+        tag = {"target": ">> TARGET", "secondary": "   secondary",
+               "avoid": "   avoid   "}.get(tier, tier)
+        print(f"  {tag}  {str(code or '?'):<5} {n:>4} zones · {int(ha or 0):>5} ha")
 
     cur.close()
     conn.close()
